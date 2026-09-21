@@ -1,0 +1,21 @@
+[workspace]
+authors = ["mebbaid <mohamed.elobaid@iit.it>"]
+channels = ["conda-forge"]
+name = "poly-computations"
+platforms = ["linux-64"]
+version = "0.1.0"
+
+[tasks]
+clean = { cmd = "rm -rf build" }
+configure = "cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release"
+build     = { cmd = "cmake --build build", depends-on = ["configure"] }
+test      = { cmd = "ctest --test-dir build --output-on-failure", depends-on = ["build"] }
+
+[dependencies]
+cmake = "*"
+cxx-compiler = "*"
+ninja = "*"
+
+eigen = "*"
+libboost-headers = "*"   
+gmp = "*"
