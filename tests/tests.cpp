@@ -274,52 +274,58 @@ void test_eliminate()
   CHECK(top == 1 && bottom == 1 && center == 2);
   CHECK(throws([&] { eliminate_k(G, 3); }));
  
-  // --- Histories: with no bound, the overload is exactly the plain kernel ---
+  // Histories: with no bound, the step is exactly the plain kernel 
   {
     const RowMat<C> M0 = hexagon_fm_system<T>();
     RowMat<C> plain = M0, tracked = M0;
-    auto H = initial_histories(M0.rows());
-    CHECK(H.size() == 12 && history_size(H[5]) == 1 && H[5][5]);
+    auto H = Histories::singletons(static_cast<std::size_t>(M0.rows()));
+    CHECK(H.rows() == 12 && H.count(5) == 1 && H.test(5, 5));
     for (Eigen::Index k = 3; k < 7; ++k) {  // 4 steps: 12 -> ... -> 2112 rows
       plain = eliminate_k(plain, k);
-      tracked = eliminate_k(tracked, k, H, std::numeric_limits<std::size_t>::max());
+      tracked = eliminate_k(tracked, k, &H);
       CHECK(plain == tracked);
-      CHECK(static_cast<Eigen::Index>(H.size()) == tracked.rows());
+      CHECK(H.rows() == static_cast<std::size_t>(tracked.rows()));
     }
     CHECK(plain.rows() == 2112);
     // Most of those rows combine more than t + 1 = 5 original rows:
     // exactly the ones Chernikov's rule would never have formed.
     std::size_t over = 0;
-    for (const auto& h : H) over += history_size(h) > 5;
+    for (std::size_t r = 0; r < H.rows(); ++r) over += H.count(r) > 5;
     CHECK(over > 2000);
   }
  
-  // --- Chernikov: the same 4 steps with bound t + 1 stay small --------------
+  // Chernikov: the same 4 steps with bound t + 1 stay small 
   {
     RowMat<C> M = hexagon_fm_system<T>();
-    auto H = initial_histories(M.rows());
+    auto H = Histories::singletons(static_cast<std::size_t>(M.rows()));
     for (Eigen::Index k = 3; k < 7; ++k) {
       const auto t = static_cast<std::size_t>(k - 3 + 1);
-      M = eliminate_k(M, k, H, t + 1);
-      for (const auto& h : H) CHECK(history_size(h) <= t + 1);
+      M = eliminate_k(M, k, &H, t + 1);
+      for (std::size_t r = 0; r < H.rows(); ++r) CHECK(H.count(r) <= t + 1);
     }
     CHECK(M.rows() < 20);
   }
  
-  // --- Kohler: strict supersets and duplicate histories are dropped ---------
+  // Kohler: a combination whose history contains a Z row's is dropped 
   {
-    RowMat<C> M = RowMat<C>::Identity(4, 4);  // row contents are irrelevant here
-    std::vector<History> H = {
-        {true, false, false, false},   // {0}
-        {true, true, false, false},    // {0,1}  strictly contains {0}: dropped
-        {false, true, true, false},    // {1,2}
-        {false, true, true, false}};   // {1,2}  duplicate: dropped
-    const RowMat<C> K2 = remove_non_minimal(M, H);
-    CHECK(K2.rows() == 2 && H.size() == 2);
-    CHECK(K2.row(0) == M.row(0) && K2.row(1) == M.row(2));
+    // Rows (1,1), (-1,1), (0,1); eliminating column 0 gives the Z row (0,1)
+    // and the combination of rows 0 and 1. With (artificial) histories
+    // {0}, {1}, {0}, the combination has history {0,1}, which strictly
+    // contains the Z row's history {0}.
+    RowMat<C> M(3, 2);
+    M << 1, 1, -1, 1, 0, 1;
+    Histories H0(3, 3);
+    H0.set(0, 0);
+    H0.set(1, 1);
+    H0.set(2, 0);
+    Histories H1 = H0;
+    CHECK(eliminate_k(M, 0, &H0).rows() == 2);                       // rule off
+    const RowMat<C> K2 = eliminate_k(M, 0, &H1, 3, true);             // rule on
+    CHECK(K2.rows() == 1 && H1.rows() == 1);
+    CHECK(K2.row(0) == M.row(2));
   }
  
-  // --- eliminate_columns: the whole V -> H elimination of the hexagon -------
+  // eliminate_columns: the whole V -> H elimination of the hexagon 
   {
     std::vector<Eigen::Index> trace;
     const RowMat<C> M = eliminate_columns(hexagon_fm_system<T>(), 3, 9, &trace);
@@ -332,9 +338,7 @@ void test_eliminate()
     CHECK((K3.col(2).array() == 0).all());
   }
 }
-
-
-// fourier_motzkin / double_description
+ 
 
 // x satisfies A x <= z and A_eq x = z_eq.
 template <class T, class X>
@@ -388,7 +392,7 @@ void test_conversion()
   RowMat<T> hexagon(6, 2);
   hexagon << 1, 2, 3, 3 * half, half, 3, 4, 2, 4, 3, 7 * half, 4;
  
-  // --- H -> V: exactly the six vertices, no rays -----------------------------
+  // H -> V: exactly the six vertices, no rays 
   {
     auto P = Polyhedron<T>::from_H(A, z);
     compute_v_representation(P);
@@ -396,7 +400,7 @@ void test_conversion()
     for (Eigen::Index i = 0; i < 6; ++i) CHECK(has_row(P.v->V, hexagon.row(i)));
   }
  
-  // --- V -> H: valid inequalities, including facets 1..6 --------------------
+  // V -> H: valid inequalities, including facets 1..6 
   {
     auto P = Polyhedron<T>::from_V(hexagon);
     compute_h_representation(P);
@@ -413,7 +417,7 @@ void test_conversion()
     for (Eigen::Index i = 0; i < 6; ++i) CHECK(has_row(Q.v->V, hexagon.row(i)));
   }
  
-  // --- H -> V, non-pointed: the half-plane x2 >= 0 ---------------------------
+  // H -> V, non-pointed: the half-plane x2 >= 0 
   // Its line (the x1-axis) comes out as a pair of opposite rays.
   {
     RowMat<T> A1(1, 2);
@@ -431,7 +435,7 @@ void test_conversion()
     CHECK(has_direction(V.Y, row({0, 1})));
   }
  
-  // --- V -> H, non-pointed: point (0,0), ray (0,1), line (1,0) --------------
+  // V -> H, non-pointed: point (0,0), ray (0,1), line (1,0) 
   {
     RowMat<T> V(1, 2), Y(1, 2), L(1, 2);
     V << 0, 0;
@@ -450,7 +454,7 @@ void test_conversion()
     CHECK(has_direction(Az, row({0, -1, 0})));  // -x2 <= 0
   }
  
-  // --- H -> V with an equality: the segment x1 + x2 = 1, x >= 0 -------------
+  // H -> V with an equality: the segment x1 + x2 = 1, x >= 0 
   {
     RowMat<T> A1(2, 2), Aeq(1, 2);
     A1 << -1, 0, 0, -1;
@@ -467,7 +471,7 @@ void test_conversion()
       CHECK(satisfies<T>(H, P.v->V.row(i).transpose()));
   }
  
-  // --- H -> V, infeasible: x1 <= -1 and x1 >= 0 ------------------------------
+  // H -> V, infeasible: x1 <= -1 and x1 >= 0 
   {
     RowMat<T> A1(2, 1);
     A1 << 1, -1;
@@ -478,7 +482,7 @@ void test_conversion()
     CHECK(P.v->V.rows() == 0);
   }
  
-  // --- The trace shows Chernikov's rule at work ------------------------------
+  // The trace shows Chernikov's rule at work 
   {
     auto P = Polyhedron<T>::from_V(hexagon);
     homogenize(P);

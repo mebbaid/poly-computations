@@ -10,6 +10,7 @@ clean = { cmd = "rm -rf build" }
 configure = "cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release"
 build     = { cmd = "cmake --build build", depends-on = ["configure"] }
 test      = { cmd = "ctest --test-dir build --output-on-failure", depends-on = ["build"] }
+bench     = { cmd = "./build/polycomp_bench", depends-on = ["build"] }
 
 [dependencies]
 cmake = "*"

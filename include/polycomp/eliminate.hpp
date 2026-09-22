@@ -1,18 +1,16 @@
 #pragma once
-//  Lectures
-//   FM (Thm 1.4):  rows are inequalities; the result describes elim_k, i.e.
-//                  the projection along e_k.
-//   DD (V^{/k}):   rows are generators; the result generates the
-//                  intersection with the hyperplane y_k = 0.
+// Ziegler, Lectures on Polytopes, Theorem 1.4 and the V^{/k} construction.
 //
-// two redundancy rules in multipliers
+// Two redundancy rules that look at histories only (no arithmetic):
 //   Chernikov: an extreme ray has at most t + 1 elements in its history.
 //   Kohler:    an extreme ray's history contains no other row's history.
-// Rows violating either rule are redundant. Both rules look at histories
-// only (no arithmetic). Both rules remove redundancy in multiplier space not in y space.
+// Both remove redundancy in multiplier space, not in y space.
+//
 
-#include <algorithm>
+#include <bit>
 #include <cstddef>
+#include <cstdint>
+#include <limits>
 #include <stdexcept>
 #include <vector>
 
@@ -21,193 +19,187 @@
 namespace polycomp
 {
 
-  // Ziegler Theorem 1.4
+  // Bit b of row i is set  <=>  original row b was used to build row i.
+  class Histories
+  {
+  public:
+    Histories() = default;
 
+    Histories(std::size_t rows, std::size_t originals)
+        : rows_(rows), words_((originals + 63) / 64), bits_(rows * words_, 0) {}
+
+    // Row b has history {b}: the start of every elimination.
+    static Histories singletons(std::size_t rows)
+    {
+      Histories H(rows, rows);
+      for (std::size_t b = 0; b < rows; ++b) H.set(b, b);
+      return H;
+    }
+
+    std::size_t rows() const { return rows_; }
+    std::size_t words() const { return words_; }
+    std::uint64_t *operator[](std::size_t i) { return bits_.data() + i * words_; }
+    const std::uint64_t *operator[](std::size_t i) const { return bits_.data() + i * words_; }
+
+    void set(std::size_t i, std::size_t b) { (*this)[i][b / 64] |= std::uint64_t{1} << (b % 64); }
+    bool test(std::size_t i, std::size_t b) const { return ((*this)[i][b / 64] >> (b % 64)) & 1u; }
+
+    std::size_t count(std::size_t i) const
+    {
+      std::size_t c = 0;
+      for (std::size_t w = 0; w < words_; ++w) c += static_cast<std::size_t>(std::popcount((*this)[i][w]));
+      return c;
+    }
+
+    std::uint64_t *append()
+    {
+      bits_.resize(++rows_ * words_, 0);
+      return (*this)[rows_ - 1];
+    }
+
+    void truncate(std::size_t rows)
+    {
+      rows_ = rows;
+      bits_.resize(rows * words_);
+    }
+
+  private:
+    std::size_t rows_ = 0, words_ = 0;
+    std::vector<std::uint64_t> bits_;
+  };
+
+  namespace internal
+  {
+    // |a u b| <= limit, stopping as soon as the limit is exceeded.
+    inline bool union_within(const std::uint64_t *a, const std::uint64_t *b, std::size_t words,
+                             std::size_t limit)
+    {
+      std::size_t c = 0;
+      for (std::size_t w = 0; w < words; ++w)
+        if ((c += static_cast<std::size_t>(std::popcount(a[w] | b[w]))) > limit) return false;
+      return true;
+    }
+
+    // a is a subset of b.
+    inline bool subset(const std::uint64_t *a, const std::uint64_t *b, std::size_t words)
+    {
+      for (std::size_t w = 0; w < words; ++w)
+        if (a[w] & ~b[w]) return false;
+      return true;
+    }
+  } // namespace internal
+
+  // Vanilla Theorem 1.4. And with the redundancy rules: 
+  // (Chernikov: max_history = t + 1 at the t-th step), and if `minimal`,
+  // rows whose history strictly contains another's, or equals an earlier
+  // one's, are dropped (Kohler).
   template <class S>
-  RowMat<S> eliminate_k(const RowMat<S> &M, Eigen::Index k)
+  RowMat<S> eliminate_k(const RowMat<S> &M, Eigen::Index k, Histories *H = nullptr,
+                        std::size_t max_history = std::numeric_limits<std::size_t>::max(),
+                        bool minimal = false)
   {
     if (k < 0 || k >= M.cols())
       throw std::out_of_range("eliminate_k: k out of range");
-
-    // Split the rows by the sign of their entry in column k.
-    std::vector<Eigen::Index> Z, P, N;
-    for (Eigen::Index i = 0; i < M.rows(); ++i)
-    {
-      const int s = sign(M(i, k));
-      (s == 0 ? Z : s > 0 ? P
-                          : N)
-          .push_back(i);
-    }
-
-    // Allocate once for the largest possible result.
-    const auto nz = static_cast<Eigen::Index>(Z.size());
-    const auto np = static_cast<Eigen::Index>(P.size());
-    const auto nn = static_cast<Eigen::Index>(N.size());
-    RowMat<S> out(nz + np * nn, M.cols());
-    Eigen::Index n = 0;
-
-    // Rows not involving column k pass through.
-    for (Eigen::Index i : Z)
-    {
-      out.row(n) = M.row(i);
-      out(n++, k) = S(0); // exact zero, even if M(i,k) was only within eps
-    }
-
-    // Every (positive, negative) pair gives one combination with column k = 0.
-    for (Eigen::Index i : P)
-      for (Eigen::Index j : N)
-      {
-        out.row(n) = M(i, k) * M.row(j) - M(j, k) * M.row(i);
-        out(n, k) = S(0);
-        if (internal::scale(out.row(n)))
-          ++n; // canonical form; zero rows dropped
-      }
-
-    out.conservativeResize(n, M.cols());
-    return out;
-  }
-
-  // history[b] == true  <=>  original row b was used to build this row.
-  using History = std::vector<bool>;
-
-  // Row b of the original matrix has history {b}.
-  inline std::vector<History> initial_histories(Eigen::Index rows)
-  {
-    const auto r = static_cast<std::size_t>(rows);
-    std::vector<History> H(r, History(r, false));
-    for (std::size_t b = 0; b < r; ++b)
-      H[b][b] = true;
-    return H;
-  }
-
-  inline std::size_t history_size(const History &h)
-  {
-    return static_cast<std::size_t>(std::count(h.begin(), h.end(), true));
-  }
-
-  // a is a subset of b.
-  inline bool history_subset(const History &a, const History &b)
-  {
-    for (std::size_t x = 0; x < a.size(); ++x)
-      if (a[x] && !b[x])
-        return false;
-    return true;
-  }
-
-  // Chernikov's rule
-  // Same as eliminate_k(M, k), plus:
-  //   - H[i] is the history of row i of M; on return H holds the histories of
-  //     the returned rows (the history of a combination is the union);
-  //   - a pair (i, j) whose union has more than max_history elements is
-  //     skipped before any arithmetic
-
-  template <class S>
-  RowMat<S> eliminate_k(const RowMat<S> &M, Eigen::Index k, std::vector<History> &H,
-                        std::size_t max_history)
-  {
-    if (k < 0 || k >= M.cols())
-      throw std::out_of_range("eliminate_k: k out of range");
-    if (static_cast<Eigen::Index>(H.size()) != M.rows())
+    if (H && H->rows() != static_cast<std::size_t>(M.rows()))
       throw std::invalid_argument("eliminate_k: one history per row required");
 
+    // 1. Split the rows by the sign of their entry in column k.
     std::vector<Eigen::Index> Z, P, N;
     for (Eigen::Index i = 0; i < M.rows(); ++i)
     {
       const int s = sign(M(i, k));
-      (s == 0 ? Z : s > 0 ? P
-                          : N)
-          .push_back(i);
+      (s == 0 ? Z : s > 0 ? P : N).push_back(i);
     }
 
-    const auto nz = static_cast<Eigen::Index>(Z.size());
-    const auto np = static_cast<Eigen::Index>(P.size());
-    const auto nn = static_cast<Eigen::Index>(N.size());
-    RowMat<S> out(nz + np * nn, M.cols());
-    std::vector<History> out_H;
-    Eigen::Index n = 0;
+    // 2. Candidates: (i, -1) passes row i through, (i, j) combines i in P
+    //    with j in N. Their histories are written into Hc as they are listed.
+    struct Candidate { Eigen::Index i, j; };
+    std::vector<Candidate> cand;
+    Histories Hc;
+    const std::size_t words = H ? H->words() : 0;
+    auto push_history = [&](const std::uint64_t *a, const std::uint64_t *b) {
+      std::uint64_t *h = Hc.append();
+      for (std::size_t w = 0; w < words; ++w) h[w] = b ? (a[w] | b[w]) : a[w];
+    };
+    if (H) Hc = Histories(0, words * 64);
 
+    cand.reserve(Z.size() + (H ? 0 : P.size() * N.size()));
     for (Eigen::Index i : Z)
     {
-      out.row(n) = M.row(i);
-      out(n++, k) = S(0);
-      out_H.push_back(H[static_cast<std::size_t>(i)]); // history unchanged
+      cand.push_back({i, -1});
+      if (H) push_history((*H)[static_cast<std::size_t>(i)], nullptr);
     }
-
     for (Eigen::Index i : P)
       for (Eigen::Index j : N)
       {
-        const History &hi = H[static_cast<std::size_t>(i)];
-        const History &hj = H[static_cast<std::size_t>(j)];
-        History h(hi.size());
-        for (std::size_t b = 0; b < h.size(); ++b)
-          h[b] = hi[b] || hj[b]; // union
-        if (history_size(h) > max_history)
-          continue; // Chernikov
-
-        out.row(n) = M(i, k) * M.row(j) - M(j, k) * M.row(i);
-        out(n, k) = S(0);
-        if (!internal::scale(out.row(n)))
-          continue;
-        ++n;
-        out_H.push_back(std::move(h));
+        if (H)
+        {
+          const auto *hi = (*H)[static_cast<std::size_t>(i)];
+          const auto *hj = (*H)[static_cast<std::size_t>(j)];
+          if (!internal::union_within(hi, hj, words, max_history)) continue; // Chernikov
+          push_history(hi, hj);
+        }
+        cand.push_back({i, j});
       }
 
-    out.conservativeResize(n, M.cols());
-    H = std::move(out_H);
-    return out;
-  }
+    // 3. Kohler.
+    std::vector<char> keep(cand.size(), 1);
+    if (H && minimal)
+    {
+      std::vector<std::size_t> size(cand.size());
+      for (std::size_t c = 0; c < cand.size(); ++c) size[c] = Hc.count(c);
+      for (std::size_t a = 0; a < cand.size(); ++a)
+        for (std::size_t b = 0; b < cand.size() && keep[a]; ++b)
+        {
+          if (a == b || !keep[b] || size[b] > size[a]) continue;
+          if (!internal::subset(Hc[b], Hc[a], words)) continue;
+          if (size[b] < size[a] || b < a) keep[a] = 0; // strict subset, or duplicate
+        }
+    }
 
-  // Kohler's rule
-  // Drops every row whose history strictly contains another row's history .
-  // Rows with identical histories are the same ray, so only the first is kept.
-  template <class S>
-  RowMat<S> remove_non_minimal(const RowMat<S> &M, std::vector<History> &H)
-  {
-    const auto r = static_cast<std::size_t>(M.rows());
-    if (H.size() != r)
-      throw std::invalid_argument("remove_non_minimal: one history per row required");
-
-    std::vector<bool> keep(r, true);
-    for (std::size_t a = 0; a < r; ++a)
-      for (std::size_t b = 0; b < r && keep[a]; ++b)
-      {
-        if (a == b || !keep[b] || !history_subset(H[b], H[a]))
-          continue;
-        if (H[b] != H[a] || b < a)
-          keep[a] = false; // strict subset, or duplicate
-      }
-
-    RowMat<S> out(M.rows(), M.cols());
-    std::vector<History> out_H;
+    // 4. Arithmetic on remaining rows.
+    std::size_t survivors = 0;
+    for (char c : keep) survivors += c;
+    RowMat<S> out(static_cast<Eigen::Index>(survivors), M.cols());
     Eigen::Index n = 0;
-    for (std::size_t a = 0; a < r; ++a)
-      if (keep[a])
+    for (std::size_t c = 0; c < cand.size(); ++c)
+    {
+      if (!keep[c]) continue;
+      const auto [i, j] = cand[c];
+      if (j < 0)
+        out.row(n) = M.row(i);
+      else
       {
-        out.row(n++) = M.row(static_cast<Eigen::Index>(a));
-        out_H.push_back(std::move(H[a]));
+        out.row(n) = M(i, k) * M.row(j) - M(j, k) * M.row(i);
+        if (!internal::scale(out.row(n))) continue; // zero row: drop
       }
+      out(n, k) = S(0); // exact zero, even if M(i,k) was only within eps
+      if (H)            // compact histories in place (n <= c)
+        for (std::size_t w = 0; w < words; ++w) Hc[static_cast<std::size_t>(n)][w] = Hc[c][w];
+      ++n;
+    }
+
     out.conservativeResize(n, M.cols());
-    H = std::move(out_H);
+    if (H)
+    {
+      Hc.truncate(static_cast<std::size_t>(n));
+      *H = std::move(Hc);
+    }
     return out;
   }
 
-  // eliminate columns first, ..., last - 1 in order (Fourier-Motzkin elimination). 
-  // The rows of M are the "original" rows for the histories, and t
-  // counts the eliminations done in this call, so after the t-th step only
-  // combinations of at most t + 1 original rows are formed (Chernikov) and
-  // rows with non-minimal histories are dropped (Kohler).
-  // Eliminated columns are left as zeros; the caller drops them.
-
+  // Eliminate columns first, ..., last - 1 in order - iterated Theorem 1.4.
   template <class S>
   RowMat<S> eliminate_columns(RowMat<S> M, Eigen::Index first, Eigen::Index last,
-                              std::vector<Eigen::Index> *trace)
+                              std::vector<Eigen::Index> *trace = nullptr)
   {
-    auto H = initial_histories(M.rows());
+    if (first < 0 || first > last || last > M.cols())
+      throw std::out_of_range("eliminate_columns: invalid column range");
+    auto H = Histories::singletons(static_cast<std::size_t>(M.rows()));
     for (Eigen::Index k = first; k < last; ++k)
     {
       const auto t = static_cast<std::size_t>(k - first + 1);
-      M = eliminate_k(M, k, H, t + 1);
-      M = remove_non_minimal(M, H);
+      M = eliminate_k(M, k, &H, t + 1, true);
       if (trace)
         trace->push_back(M.rows());
     }
