@@ -378,6 +378,32 @@ void test_eliminate()
       CHECK(a.size() == b.size());
       for (std::size_t s = 0; s < a.size() && s < b.size(); ++s) CHECK(a[s] == b[s]);
     }
+
+    // eliminate_columns (row pool, shrinking width) computes exactly the same
+    // matrix as one eliminate_k per column, for both rules.
+    for (const auto& M : systems) {
+      const Eigen::Index D = M.rows() - M.cols();
+      for (auto mode : {Pruning::Minimality::kohler, Pruning::Minimality::adjacency}) {
+        std::vector<Eigen::Index> trace;
+        const RowMat<C> pooled = eliminate_columns(M, D, M.cols(), &trace, mode);
+        const auto steps = run(M, D, M.cols(), mode);
+        CHECK(pooled == steps.back());
+        CHECK(trace.size() == steps.size());
+        for (std::size_t s = 0; s < trace.size() && s < steps.size(); ++s)
+          CHECK(trace[s] == steps[s].rows());
+      }
+    }
+    // ... also when the eliminated range is not at the end: eliminate the
+    // first two columns of the hexagon system (y0, y1).
+    {
+      const RowMat<C> M = hexagon_fm_system<T>();
+      const RowMat<C> pooled = eliminate_columns(M, 0, 2, nullptr, Pruning::Minimality::kohler);
+      auto H = Histories::singletons(static_cast<std::size_t>(M.rows()));
+      RowMat<C> X = eliminate_k(M, 0, &H, Pruning{2, Pruning::Minimality::kohler});
+      X = eliminate_k(X, 1, &H, Pruning{3, Pruning::Minimality::kohler});
+      CHECK(pooled == X);
+      CHECK((pooled.leftCols(2).array() == 0).all());
+    }
   }
 
   // --- eliminate_columns: the whole V -> H elimination of the hexagon -------
@@ -433,6 +459,7 @@ bool has_direction(const RowMat<T>& M, const X& x)
 template <class T>
 void test_conversion()
 {
+  using C = cone_number_t<T>;
   using RowT = Eigen::Matrix<T, 1, Eigen::Dynamic>;
   auto row = [](std::initializer_list<T> v) {
     RowT r(static_cast<Eigen::Index>(v.size()));
@@ -458,11 +485,12 @@ void test_conversion()
     for (Eigen::Index i = 0; i < 6; ++i) CHECK(has_row(P.v->V, hexagon.row(i)));
   }
 
-  // --- V -> H: valid inequalities, including facets 1..6 --------------------
+  // --- V -> H: exactly the six facets (row 7 of Ziegler's system is not one) ---
   {
     auto P = Polyhedron<T>::from_V(hexagon);
     compute_h_representation(P);
     const auto& H = *P.h;
+    CHECK(H.A.rows() == 6 && H.A_eq.rows() == 0);
     for (Eigen::Index i = 0; i < 6; ++i) CHECK(satisfies<T>(H, hexagon.row(i).transpose()));
     RowMat<T> Az(H.A.rows(), 3);
     Az << H.A, H.z;
@@ -476,7 +504,7 @@ void test_conversion()
   }
 
   // --- H -> V, non-pointed: the half-plane x2 >= 0 ---------------------------
-  // Its line (the x1-axis) comes out as a pair of opposite rays.
+  // One point on the boundary, the ray (0,1), and the x1-axis as a line.
   {
     RowMat<T> A1(1, 2);
     A1 << 0, -1;
@@ -485,12 +513,9 @@ void test_conversion()
     auto P = Polyhedron<T>::from_H(A1, z1);
     compute_v_representation(P);
     const auto& V = *P.v;
-    CHECK(V.V.rows() >= 1);
-    for (Eigen::Index i = 0; i < V.V.rows(); ++i) CHECK(sign(V.V(i, 1)) == 0);
-    for (Eigen::Index i = 0; i < V.Y.rows(); ++i) CHECK(sign(V.Y(i, 1)) >= 0);
-    CHECK(has_direction(V.Y, row({1, 0})));
-    CHECK(has_direction(V.Y, row({-1, 0})));
-    CHECK(has_direction(V.Y, row({0, 1})));
+    CHECK(V.V.rows() == 1 && sign(V.V(0, 1)) == 0);
+    CHECK(V.Y.rows() == 1 && same_direction(V.Y.row(0), row({0, 1})));
+    CHECK(V.L.rows() == 1 && same_direction(V.L.row(0), row({1, 0}), true));
   }
 
   // --- V -> H, non-pointed: point (0,0), ray (0,1), line (1,0) --------------
@@ -509,7 +534,79 @@ void test_conversion()
     }
     RowMat<T> Az(H.A.rows(), 3);
     Az << H.A, H.z;
-    CHECK(has_direction(Az, row({0, -1, 0})));  // -x2 <= 0
+    CHECK(H.A.rows() == 1 && has_direction(Az, row({0, -1, 0})));  // exactly -x2 <= 0
+    CHECK(H.A_eq.rows() == 0);                                     // full-dimensional
+  }
+
+  // --- Linearity comes out explicitly on both sides --------------------------
+  {
+    // V -> H of a segment: the equality x1 = x2 and two bounds, nothing else.
+    RowMat<T> V(2, 2);
+    V << 0, 0, 1, 1;
+    auto P = Polyhedron<T>::from_V(V);
+    compute_h_representation(P);
+    CHECK(P.h->A.rows() == 2 && P.h->A_eq.rows() == 1);
+    CHECK(same_direction(hrow<T>(P.h->A_eq.row(0), P.h->z_eq(0)), row({1, -1, 0}), true));
+
+    // H -> V of a line given only by an equality: one point and one line.
+    RowMat<T> Aeq(1, 2);
+    Aeq << 1, -1;
+    Vec<T> zeq(1);
+    zeq << 0;
+    auto Q = Polyhedron<T>::from_H(RowMat<T>(0, 2), Vec<T>(0), Aeq, zeq);
+    compute_v_representation(Q);
+    CHECK(Q.v->V.rows() == 1 && Q.v->Y.rows() == 0 && Q.v->L.rows() == 1);
+    CHECK(same_direction(Q.v->L.row(0), row({1, 1}), true));
+    CHECK(sign(T(Q.v->V(0, 0) - Q.v->V(0, 1))) == 0);
+
+    // Round trip with a line: V -> H -> V gives one point back, not two.
+    RowMat<T> V2(1, 2), Y2(0, 2), L2(1, 2);
+    V2 << 1, 0;
+    L2 << 1, 1;
+    auto R = Polyhedron<T>::from_V(V2, Y2, L2);
+    compute_h_representation(R);
+    auto R2 = Polyhedron<T>::from_H(R.h->A, R.h->z, R.h->A_eq, R.h->z_eq);
+    compute_v_representation(R2);
+    CHECK(R2.v->V.rows() == 1 && R2.v->Y.rows() == 0 && R2.v->L.rows() == 1);
+  }
+
+  // --- pivot_out: Gaussian substitution of equalities ------------------------
+  {
+    // x0 + x1 - 2 x2 = 0 and x1 - x2 = 0 pivot on x2 then x1; the inequality
+    // x1 + x2 <= 0 (row (0,1,1)) becomes a bound on x0 alone.
+    RowMat<C> E(2, 3), M(1, 3);
+    E << 1, 1, -2, 0, 1, -1;
+    M << 0, 1, 1;
+    std::vector<Eigen::Index> remaining;
+    pivot_out(M, E, std::vector<Eigen::Index>{2, 1}, remaining);
+    CHECK(remaining.empty() && E.rows() == 0);
+    CHECK(sign(M(0, 1)) == 0 && sign(M(0, 2)) == 0 && sign(M(0, 0)) > 0);  // 2 x0 <= 0, scaled
+    // A column no equality can pivot on stays, and an unused equality survives.
+    RowMat<C> E2(1, 3), M2(1, 3);
+    E2 << 1, 0, 0;
+    M2 << 1, 1, 1;
+    pivot_out(M2, E2, std::vector<Eigen::Index>{1}, remaining);
+    CHECK(remaining.size() == 1 && remaining[0] == 1 && E2.rows() == 1);
+  }
+
+  // --- facets: incidence test, and rank ---------------------------------------
+  {
+    // The square cone {y : +-y1 <= y0, +-y2 <= y0} with its four rays, plus
+    // two redundant rows: y1 + y2 <= 2 y0 (implied) and 0 <= y0 (implied).
+    RowMat<C> A(6, 3), R(4, 3), L(0, 3);
+    A << -1, 1, 0, -1, -1, 0, -1, 0, 1, -1, 0, -1, -2, 1, 1, -1, 0, 0;
+    R << 1, 1, 1, 1, 1, -1, 1, -1, 1, 1, -1, -1;
+    CHECK(internal::rank(R) == 3 && internal::rank(A) == 3);
+    const auto f = facets(A, R, L);
+    CHECK(f.kept.rows() == 4 && f.implicit.rows() == 0);
+    const auto g = facets(R, A, RowMat<C>(0, 3));
+    CHECK(g.kept.rows() == 4);  // all four rays are extreme
+    // A row tight on every ray is an implicit equality.
+    RowMat<C> A2(1, 3);
+    A2 << 0, 0, 1;
+    RowMat<C> R2(2, 3);
+    R2 << 1, 1, 0, 1, -1, 0;
+    CHECK(facets(A2, R2, L).implicit.rows() == 1);
   }
 
   // --- H -> V with an equality: the segment x1 + x2 = 1, x >= 0 -------------
@@ -540,14 +637,59 @@ void test_conversion()
     CHECK(P.v->V.rows() == 0);
   }
 
+  // --- project: unit cube onto (x1, x2) is the unit square ------------------
+  {
+    RowMat<T> A1(6, 3);
+    A1 << 1, 0, 0, -1, 0, 0, 0, 1, 0, 0, -1, 0, 0, 0, 1, 0, 0, -1;
+    Vec<T> z1(6);
+    z1 << 1, 0, 1, 0, 1, 0;
+    const auto Q = project(Polyhedron<T>::from_H(A1, z1), 2);
+    CHECK(Q.d == 2 && Q.h->A.rows() == 4 && Q.h->A_eq.rows() == 0);
+    CHECK(Q.v->V.rows() == 4 && Q.v->Y.rows() == 0 && Q.v->L.rows() == 0);
+    for (auto p : {row({0, 0}), row({1, 0}), row({0, 1}), row({1, 1})}) CHECK(has_row(Q.v->V, p));
+  }
+
+  // --- project through an equality: x1 = x2 + x3, x2, x3 in [0, 1] -> [0, 2] -
+  {
+    RowMat<T> A1(4, 3), Aeq(1, 3);
+    A1 << 0, 1, 0, 0, -1, 0, 0, 0, 1, 0, 0, -1;
+    Aeq << 1, -1, -1;
+    Vec<T> z1(4), zeq(1);
+    z1 << 1, 0, 1, 0;
+    zeq << 0;
+    std::vector<Eigen::Index> trace;
+    const auto Q = project(Polyhedron<T>::from_H(A1, z1, Aeq, zeq), 1, &trace);
+    CHECK(trace.size() == 1);  // x2 pivoted out by the equality, x3 by Fourier-Motzkin
+    CHECK(Q.h->A.rows() == 2 && Q.h->A_eq.rows() == 0);
+    CHECK(Q.v->V.rows() == 2 && has_row(Q.v->V, row({0})) && has_row(Q.v->V, row({2})));
+  }
+
+  // --- project keeps equalities that do not involve the dropped columns -----
+  {
+    // x1 = x2, x3 in [0, 1]  ->  the line x1 = x2 in R^2
+    RowMat<T> A1(2, 3), Aeq(1, 3);
+    A1 << 0, 0, 1, 0, 0, -1;
+    Aeq << 1, -1, 0;
+    Vec<T> z1(2), zeq(1);
+    z1 << 1, 0;
+    zeq << 0;
+    const auto Q = project(Polyhedron<T>::from_H(A1, z1, Aeq, zeq), 2);
+    CHECK(Q.h->A.rows() == 0 && Q.h->A_eq.rows() == 1);
+    CHECK(same_direction(hrow<T>(Q.h->A_eq.row(0), Q.h->z_eq(0)), row({1, -1, 0}), true));
+    CHECK(Q.v->V.rows() == 1 && Q.v->L.rows() == 1);
+    CHECK(same_direction(Q.v->L.row(0), row({1, 1}), true));
+  }
+
   // --- The trace shows Chernikov's rule at work ------------------------------
   {
     auto P = Polyhedron<T>::from_V(hexagon);
     homogenize(P);
     std::vector<Eigen::Index> trace;
     fourier_motzkin(P, &trace);
-    CHECK(trace.size() == 6);  // one entry per eliminated lambda
-    CHECK(*std::max_element(trace.begin(), trace.end()) < 20);
+    // D = 3 of the 6 lambdas are substituted away by the equalities; the
+    // other 3 are eliminated by Fourier-Motzkin, each step staying at 6 rows.
+    CHECK(trace.size() == 3);
+    CHECK(*std::max_element(trace.begin(), trace.end()) <= 6);
   }
 }
 

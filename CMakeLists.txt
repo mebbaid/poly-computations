@@ -21,11 +21,19 @@ endif()
 
 if(PROJECT_IS_TOP_LEVEL)
   enable_testing()
+
   add_executable(polycomp_tests tests/tests.cpp)
-  add_executable(polycomp_bench bench/bench_conversion.cpp)
-  target_link_libraries(polycomp_bench PRIVATE polycomp)
   target_link_libraries(polycomp_tests PRIVATE polycomp)
   target_compile_options(polycomp_tests PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME polycomp_tests COMMAND polycomp_tests)
-  add_test(NAME polycomp_bench COMMAND polycomp_bench)
+
+  if(POLYCOMP_WITH_GMP)   # the comparison with Caron's cone is exact: needs Rational
+    add_executable(polycomp_test_cwc tests/cwc.cpp)
+    target_link_libraries(polycomp_test_cwc PRIVATE polycomp)
+    target_compile_options(polycomp_test_cwc PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME polycomp_test_cwc COMMAND polycomp_test_cwc)
+  endif()
+
+  add_executable(polycomp_bench bench/bench_cwc.cpp)
+  target_link_libraries(polycomp_bench PRIVATE polycomp)
 endif()

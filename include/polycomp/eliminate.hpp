@@ -28,6 +28,14 @@
 //
 // On input that is itself minimal, Kohler and Adjacency keep exactly the same
 // rows. All three remove redundancy in multiplier space, not in y space.
+//
+// Lines / equalities. A row that holds with equality (an equality a y = 0 on
+// the H side, a line on the V side) needs no pairing: if its entry in column
+// k is nonzero it is a pivot, and every other row r is replaced by
+//     |p_k| r - sign(p_k) r_k p,
+// which has r_k = 0, keeps the direction of an inequality (positive factor
+// |p_k|) and stays in the cone (any multiple of a line may be added). The
+// pivot row is then consumed. This is Gaussian elimination; see pivot_out.
 
 #include <bit>
 #include <cstddef>
@@ -73,18 +81,11 @@ namespace polycomp
       return c;
     }
 
-    // Appends an empty history and returns it.
-    std::uint64_t *append()
-    {
-      bits_.resize(++rows_ * words_, 0);
-      return (*this)[rows_ - 1];
-    }
-
-    // Keeps the first `rows` histories.
-    void truncate(std::size_t rows)
+    // Keeps the first `rows` histories (or grows with empty ones).
+    void resize(std::size_t rows)
     {
       rows_ = rows;
-      bits_.resize(rows * words_);
+      bits_.resize(rows * words_, 0);
     }
 
   private:
@@ -121,6 +122,14 @@ namespace polycomp
       return true;
     }
 
+    // out = a | b, returning |out|.
+    inline std::size_t set_union(const std::uint64_t *a, const std::uint64_t *b, std::uint64_t *out, std::size_t words)
+    {
+      std::size_t c = 0;
+      for (std::size_t w = 0; w < words; ++w) c += static_cast<std::size_t>(std::popcount(out[w] = a[w] | b[w]));
+      return c;
+    }
+
     struct SignSplit { std::vector<Eigen::Index> Z, P, N; };
 
     template <class S>
@@ -138,74 +147,25 @@ namespace polycomp
     // (i, -1) passes row i through; (i, j) combines i in P with j in N.
     struct Candidate { Eigen::Index i, j; };
 
-    // Kohler: keep[a] = 0 if some other kept candidate's history is a strict
-    // subset of a's, or equal to it and listed earlier.
-    inline void kohler(const Histories &Hc, std::vector<char> &keep)
+    // The candidates of one step, decided from signs and histories only.
+    // Steps 2 and 3 of an elimination: never touches the numbers.
+    inline std::vector<Candidate> select(const SignSplit &split, const Histories *H, const Pruning &rules)
     {
-      const std::size_t c = Hc.rows(), words = Hc.words();
-      std::vector<std::size_t> size(c);
-      for (std::size_t a = 0; a < c; ++a) size[a] = Hc.count(a);
-      for (std::size_t a = 0; a < c; ++a)
-        for (std::size_t b = 0; b < c && keep[a]; ++b)
-        {
-          if (a == b || !keep[b] || size[b] > size[a]) continue;
-          if (!subset(Hc[b], Hc[a], words)) continue;
-          if (size[b] < size[a] || b < a) keep[a] = 0;
-        }
-    }
-  } // namespace internal
+      using Minimality = Pruning::Minimality;
+      const auto &[Z, P, N] = split;
+      std::vector<Candidate> cand;
+      cand.reserve(Z.size() + (H ? 0 : P.size() * N.size()));
+      for (Eigen::Index i : Z) cand.push_back({i, -1});
 
-  // One elimination step.
-  //
-  // Without histories (H == nullptr) this is exactly Theorem 1.4, and `rules`
-  // is ignored. With histories, `rules` decides which candidates are kept:
-  //   rules.max_history  Chernikov bound, t + 1 at the t-th step;
-  //   rules.minimality   none, kohler (candidates vs candidates), or adjacency
-  //                      (pairs vs current rows; exact if M is itself minimal).
-  // Rows that come out zero are dropped in every mode.
-  template <class S>
-  RowMat<S> eliminate_k(const RowMat<S> &M, Eigen::Index k, Histories *H = nullptr,
-                        Pruning rules = {})
-  {
-    using internal::Candidate;
-    using Minimality = Pruning::Minimality;
-    if (k < 0 || k >= M.cols())
-      throw std::out_of_range("eliminate_k: k out of range");
-    if (H && H->rows() != static_cast<std::size_t>(M.rows()))
-      throw std::invalid_argument("eliminate_k: one history per row required");
-
-    // 1. Split the rows by the sign of their entry in column k.
-    const auto [Z, P, N] = internal::split_by_sign(M, k);
-
-    // 2. List the candidates. Without histories: all of Z and all of P x N.
-    //    With histories: each pair is tested before it is listed, and its
-    //    history (the union) is written into Hc.
-    std::vector<Candidate> cand;
-    Histories Hc;
-    const std::size_t words = H ? H->words() : 0;
-    if (H) Hc = Histories(0, words * 64);
-
-    cand.reserve(Z.size() + (H ? 0 : P.size() * N.size()));
-    for (Eigen::Index i : Z)
-    {
-      cand.push_back({i, -1});
-      if (H)
+      if (!H)
       {
-        auto *h = Hc.append();
-        const auto *hi = (*H)[static_cast<std::size_t>(i)];
-        for (std::size_t w = 0; w < words; ++w) h[w] = hi[w];
+        for (Eigen::Index i : P)
+          for (Eigen::Index j : N) cand.push_back({i, j});
+        return cand;
       }
-    }
 
-    if (!H)
-    {
-      for (Eigen::Index i : P)
-        for (Eigen::Index j : N) cand.push_back({i, j});
-    }
-    else
-    {
+      const std::size_t words = H->words(), m = H->rows();
       const bool adjacency = rules.minimality == Minimality::adjacency;
-      const std::size_t m = H->rows();
 
       // Sizes of the current histories, for the adjacency test's size filter.
       std::vector<std::size_t> size(adjacency ? m : 0);
@@ -227,8 +187,7 @@ namespace polycomp
         {
           neighbours.clear();
           for (std::size_t w = 0; w < m; ++w)
-            if (w != ui && internal::union_within(hi, (*H)[w], words, rules.max_history))
-              neighbours.push_back(w);
+            if (w != ui && union_within(hi, (*H)[w], words, rules.max_history)) neighbours.push_back(w);
         }
 
         for (Eigen::Index j : N)
@@ -236,46 +195,77 @@ namespace polycomp
           const auto uj = static_cast<std::size_t>(j);
           const auto *hj = (*H)[uj];
 
-          // Chernikov.
-          if (!internal::union_within(hi, hj, words, rules.max_history)) continue;
+          if (!union_within(hi, hj, words, rules.max_history)) continue; // Chernikov
 
-          std::size_t qsize = 0;
-          for (std::size_t w = 0; w < words; ++w)
-            qsize += static_cast<std::size_t>(std::popcount(q[w] = hi[w] | hj[w]));
-
-          // Adjacency: refuted by any other current row inside the union.
           if (adjacency)
           {
+            const std::size_t qsize = set_union(hi, hj, q.data(), words);
             bool refuted = false;
             for (std::size_t w : neighbours)
-              if (w != uj && size[w] <= qsize && internal::subset((*H)[w], q.data(), words))
-              {
-                refuted = true;
-                break;
-              }
+              if (w != uj && size[w] <= qsize && subset((*H)[w], q.data(), words)) { refuted = true; break; }
             if (refuted) continue;
           }
-
-          auto *h = Hc.append();
-          for (std::size_t w = 0; w < words; ++w) h[w] = q[w];
           cand.push_back({i, j});
         }
       }
+
+      // Kohler: compare the candidates' histories with each other.
+      if (rules.minimality == Minimality::kohler)
+      {
+        const std::size_t c = cand.size();
+        Histories Hc(c, words * 64);
+        std::vector<std::size_t> csize(c);
+        for (std::size_t a = 0; a < c; ++a)
+        {
+          const auto [i, j] = cand[a];
+          const auto *hi = (*H)[static_cast<std::size_t>(i)];
+          csize[a] = j < 0 ? set_union(hi, hi, Hc[a], words)
+                           : set_union(hi, (*H)[static_cast<std::size_t>(j)], Hc[a], words);
+        }
+        std::vector<char> keep(c, 1);
+        for (std::size_t a = 0; a < c; ++a)
+          for (std::size_t b = 0; b < c && keep[a]; ++b)
+          {
+            if (a == b || !keep[b] || csize[b] > csize[a] || !subset(Hc[b], Hc[a], words)) continue;
+            if (csize[b] < csize[a] || b < a) keep[a] = 0; // strict subset, or duplicate
+          }
+        std::size_t n = 0;
+        for (std::size_t a = 0; a < c; ++a)
+          if (keep[a]) cand[n++] = cand[a];
+        cand.resize(n);
+      }
+      return cand;
     }
+  } // namespace internal
 
-    // 3. Kohler, if asked for: needs the complete candidate list.
-    std::vector<char> keep(cand.size(), 1);
-    if (H && rules.minimality == Minimality::kohler) internal::kohler(Hc, keep);
+  // One elimination step.
+  //
+  // Without histories (H == nullptr) this is exactly Theorem 1.4, and `rules`
+  // is ignored. With histories (one per row of M, replaced on return by those
+  // of the result), `rules` decides which candidates are kept:
+  //   rules.max_history  Chernikov bound, t + 1 at the t-th step;
+  //   rules.minimality   none, kohler (candidates vs candidates), or adjacency
+  //                      (pairs vs current rows; exact if M is itself minimal).
+  // Rows that come out zero are dropped in every mode.
+  template <class S>
+  RowMat<S> eliminate_k(const RowMat<S> &M, Eigen::Index k, Histories *H = nullptr, Pruning rules = {})
+  {
+    if (k < 0 || k >= M.cols())
+      throw std::out_of_range("eliminate_k: k out of range");
+    if (H && H->rows() != static_cast<std::size_t>(M.rows()))
+      throw std::invalid_argument("eliminate_k: one history per row required");
 
-    // 4. Arithmetic, only for the kept candidates.
-    std::size_t kept = 0;
-    for (char c : keep) kept += c;
-    RowMat<S> out(static_cast<Eigen::Index>(kept), M.cols());
+    // 1-3. Split by sign, list the candidates, apply the rules.
+    const auto cand = internal::select(internal::split_by_sign(M, k), H, rules);
+
+    // 4. Arithmetic, only for the kept candidates; histories alongside.
+    const std::size_t words = H ? H->words() : 0;
+    Histories Hn;
+    if (H) Hn = Histories(cand.size(), words * 64);
+    RowMat<S> out(static_cast<Eigen::Index>(cand.size()), M.cols());
     Eigen::Index n = 0;
-    for (std::size_t c = 0; c < cand.size(); ++c)
+    for (const auto [i, j] : cand)
     {
-      if (!keep[c]) continue;
-      const auto [i, j] = cand[c];
       if (j < 0)
         out.row(n) = M.row(i);
       else
@@ -284,25 +274,44 @@ namespace polycomp
         if (!internal::scale(out.row(n))) continue; // zero row: drop
       }
       out(n, k) = S(0); // exact zero, even if M(i,k) was only within eps
-      if (H)            // compact histories in place (n <= c)
-        for (std::size_t w = 0; w < words; ++w) Hc[static_cast<std::size_t>(n)][w] = Hc[c][w];
+      if (H)
+      {
+        const auto *hi = (*H)[static_cast<std::size_t>(i)];
+        internal::set_union(hi, j < 0 ? hi : (*H)[static_cast<std::size_t>(j)], Hn[static_cast<std::size_t>(n)], words);
+      }
       ++n;
     }
-
     out.conservativeResize(n, M.cols());
     if (H)
     {
-      Hc.truncate(static_cast<std::size_t>(n));
-      *H = std::move(Hc);
+      Hn.resize(static_cast<std::size_t>(n));
+      *H = std::move(Hn);
     }
     return out;
   }
 
-  // Eliminate columns first, ..., last - 1 in order (iterated Theorem 1.4).
-  // The rows of M are the original rows for the histories and t counts the
-  // eliminations done in this call; each step applies Chernikov (t + 1) and
-  // the adjacency test. Eliminated columns are left as zeros; the caller
-  // drops them.
+  // Eliminate the given columns in order (iterated Theorem 1.4). The rows of
+  // M are the original rows for the histories and t counts the eliminations
+  // done in this call; each step applies Chernikov (t + 1) and `minimality`.
+  // Eliminated columns are left as zeros; the caller drops them.
+  template <class S>
+  RowMat<S> eliminate_columns(RowMat<S> M, const std::vector<Eigen::Index> &cols,
+                              std::vector<Eigen::Index> *trace = nullptr,
+                              Pruning::Minimality minimality = Pruning::Minimality::adjacency)
+  {
+    for (Eigen::Index k : cols)
+      if (k < 0 || k >= M.cols()) throw std::out_of_range("eliminate_columns: column out of range");
+    auto H = Histories::singletons(static_cast<std::size_t>(M.rows()));
+    std::size_t t = 0;
+    for (Eigen::Index k : cols)
+    {
+      M = eliminate_k(M, k, &H, Pruning{++t + 1, minimality});
+      if (trace) trace->push_back(M.rows());
+    }
+    return M;
+  }
+
+  // Columns first, ..., last - 1.
   template <class S>
   RowMat<S> eliminate_columns(RowMat<S> M, Eigen::Index first, Eigen::Index last,
                               std::vector<Eigen::Index> *trace = nullptr,
@@ -310,15 +319,54 @@ namespace polycomp
   {
     if (first < 0 || first > last || last > M.cols())
       throw std::out_of_range("eliminate_columns: invalid column range");
-    auto H = Histories::singletons(static_cast<std::size_t>(M.rows()));
-    for (Eigen::Index k = first; k < last; ++k)
+    std::vector<Eigen::Index> cols;
+    for (Eigen::Index k = first; k < last; ++k) cols.push_back(k);
+    return eliminate_columns(std::move(M), cols, trace, minimality);
+  }
+
+  // Gaussian elimination of the columns in `cols`, in order, using the rows
+  // of E as pivots (equalities on the H side, lines on the V side).
+  //
+  // For each column c that some remaining row of E has nonzero, that row p
+  // becomes the pivot: every other row r of M and of E is replaced by
+  //     |p_c| r - sign(p_c) r_c p,
+  // so column c becomes zero everywhere, and p is consumed. Columns with no
+  // pivot are left for Fourier-Motzkin and returned in `remaining`. The rows
+  // of E that were never used as pivots are returned in E: they are zero on
+  // all of `cols` and are equalities (lines) of the projection.
+  // Every row is rescaled to canonical form after each pivot.
+  template <class S>
+  void pivot_out(RowMat<S> &M, RowMat<S> &E, const std::vector<Eigen::Index> &cols,
+                 std::vector<Eigen::Index> &remaining)
+  {
+    remaining.clear();
+    std::vector<char> used(static_cast<std::size_t>(E.rows()), 0);
+    for (Eigen::Index c : cols)
     {
-      const auto t = static_cast<std::size_t>(k - first + 1);
-      M = eliminate_k(M, k, &H, Pruning{t + 1, minimality});
-      if (trace)
-        trace->push_back(M.rows());
+      Eigen::Index p = -1;
+      for (Eigen::Index i = 0; i < E.rows() && p < 0; ++i)
+        if (!used[static_cast<std::size_t>(i)] && sign(E(i, c)) != 0) p = i;
+      if (p < 0) { remaining.push_back(c); continue; }
+      used[static_cast<std::size_t>(p)] = 1;
+
+      const S pc = E(p, c);
+      const S apc = sign(pc) > 0 ? pc : S(-pc);
+      auto reduce = [&](auto &&row, bool any_sign) {
+        if (sign(row(c)) == 0) return;
+        row = apc * row - (sign(pc) > 0 ? row(c) : S(-row(c))) * E.row(p);
+        row(c) = S(0);
+        internal::scale(row, any_sign);
+      };
+      for (Eigen::Index i = 0; i < M.rows(); ++i) reduce(M.row(i), false);
+      for (Eigen::Index i = 0; i < E.rows(); ++i)
+        if (i != p) reduce(E.row(i), true);
     }
-    return M;
+
+    // Drop the consumed pivot rows.
+    Eigen::Index n = 0;
+    for (Eigen::Index i = 0; i < E.rows(); ++i)
+      if (!used[static_cast<std::size_t>(i)]) E.row(n++) = E.row(i);
+    E.conservativeResize(n, E.cols());
   }
 
 } // namespace polycomp
