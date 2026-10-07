@@ -6,7 +6,8 @@
 //
 //   compute_h_representation(P), compute_v_representation(P):
 //       homogenize, convert, remove redundancy, dehomogenize.
-//   project(P, k): H-polyhedron onto its first k coordinates, minimal output.
+//   project(P, k):      H-polyhedron onto its first k coordinates, certified minimal.
+//   project_rows(P, k): the same, rows straight out of elimination (fast path).
 //
 // Both lift the cone to a higher-dimensional one with extra columns, and
 // then remove those columns with the same routine, project_block:
@@ -137,29 +138,58 @@ namespace polycomp
   //
   // On the homogenized cone the columns are [ x0 | x' | x'' ]; the x''
   // columns are removed by project_block (equalities pivot first, the rest
-  // by Fourier-Motzkin). The result is completed exactly like the
-  // conversions: double description for its generators, redundancy removal
-  // with both cones, dehomogenization. The returned polyhedron is minimal on
-  // both sides: facets with explicit equalities, and points, extreme rays and
-  // lines.
+  // by Fourier-Motzkin). Two ways to finish:
+  //
+  //   project_rows(P, k): the rows out of elimination, exact duplicates
+  //       dropped, dehomogenized. Every row is valid for pi(P) and together
+  //       they describe it, but some may be redundant: the history rules
+  //       remove redundancy in multiplier space only. No V-representation.
+  //   project(P, k): the same rows, then certified minimal like the
+  //       conversions: double description for the generators, redundancy
+  //       removal with both cones, dehomogenization. Facets with explicit
+  //       equalities, and points, extreme rays and lines.
+  //
+  // project_rows is the real-time path when the elimination is known to be
+  // exact for the problem class (e.g. the contact wrench cone); project is
+  // the reference and the way to find that out.
   //
   // (Projecting a V-polyhedron is just dropping columns of V, Y, L.)
-  template <class T>
-  Polyhedron<T> project(Polyhedron<T> P, Eigen::Index k, std::vector<Eigen::Index> *trace = nullptr,
-                        Pruning::Minimality minimality = Pruning::Minimality::adjacency)
+  namespace internal
   {
-    if (!P.h) throw std::logic_error("project: P has no H-representation");
-    if (k < 0 || k > P.d) throw std::out_of_range("project: k must be in [0, d]");
-    homogenize(P);
-    auto &H = *P.h_cone;
+    template <class T>
+    typename Polyhedron<T>::HCone projected_cone(Polyhedron<T> P, Eigen::Index k, std::vector<Eigen::Index> *trace,
+                                                 Pruning::Minimality minimality)
+    {
+      if (!P.h) throw std::logic_error("project: P has no H-representation");
+      if (k < 0 || k > P.d) throw std::out_of_range("project: k must be in [0, d]");
+      homogenize(P);
+      auto &H = *P.h_cone;
 
-    std::vector<Eigen::Index> cols;
-    for (Eigen::Index c = k + 1; c <= P.d; ++c) cols.push_back(c);
-    auto [A, E] = internal::project_block(std::move(H.A), std::move(H.E), cols, k + 1, trace, minimality);
+      std::vector<Eigen::Index> cols;
+      for (Eigen::Index c = k + 1; c <= P.d; ++c) cols.push_back(c);
+      auto [A, E] = project_block(std::move(H.A), std::move(H.E), cols, k + 1, trace, minimality);
+      return {unique_rows(A), independent_rows(E)};
+    }
+  } // namespace internal
 
+  template <class T>
+  Polyhedron<T> project_rows(const Polyhedron<T> &P, Eigen::Index k, std::vector<Eigen::Index> *trace = nullptr,
+                             Pruning::Minimality minimality = Pruning::Minimality::adjacency)
+  {
     Polyhedron<T> Q;
     Q.d = k;
-    Q.h_cone = typename Polyhedron<T>::HCone{std::move(A), std::move(E)};
+    Q.h_cone = internal::projected_cone(P, k, trace, minimality);
+    dehomogenize(Q);
+    return Q;
+  }
+
+  template <class T>
+  Polyhedron<T> project(const Polyhedron<T> &P, Eigen::Index k, std::vector<Eigen::Index> *trace = nullptr,
+                        Pruning::Minimality minimality = Pruning::Minimality::adjacency)
+  {
+    Polyhedron<T> Q;
+    Q.d = k;
+    Q.h_cone = internal::projected_cone(P, k, trace, minimality);
     double_description(Q);
     remove_redundancy(Q);
     dehomogenize(Q);

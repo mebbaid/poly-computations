@@ -19,6 +19,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/gmp-6.3.0-hfd2156b_3.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/gxx-15.3.0-hc6a0c74_5.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/gxx_impl_linux-64-15.3.0-h90d9265_5.conda
+      - conda: https://conda.anaconda.org/conda-forge/linux-64/highs-1.15.1-h171cf75_1.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/icu-78.3-py310h44b86e0_2.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/kernel-headers_linux-64-4.18.0-he073ed8_9.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/keyutils-1.6.3-h7cc23a3_1.conda
@@ -205,6 +206,17 @@ packages:
   license_family: GPL
   size: 16225632
   timestamp: 1789486960809
+- conda: https://conda.anaconda.org/conda-forge/linux-64/highs-1.15.1-h171cf75_1.conda
+  sha256: 5c3890538f4c893c83f01672faff0c3a479521f307a91944aa80840f62a01d7f
+  md5: 2c4b25f69385ef30ab4aa7c01bade52f
+  depends:
+  - __glibc >=2.17,<3.0.a0
+  - libstdcxx >=14
+  - libgcc >=14
+  license: MIT
+  license_family: MIT
+  size: 2685787
+  timestamp: 1783691348022
 - conda: https://conda.anaconda.org/conda-forge/linux-64/icu-78.3-py310h44b86e0_2.conda
   sha256: 9f07834f0c546ab14d885ce0366285f61f44e326c0edd1fc63b8294e113ae432
   md5: 72a381cbad04f24b1c2a43ef707f45b4
