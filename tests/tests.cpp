@@ -1,8 +1,12 @@
-// tests of computation cases
+// All tests in one executable: exit code != 0 on failure.
+// One function per header, each run for every scalar type.
 #include <algorithm>
 #include <iostream>
+#include <limits>
+#include <random>
 #include <stdexcept>
 
+#include "polycomp/conversion.hpp"
 #include "polycomp/eliminate.hpp"
 #include "polycomp/normalize.hpp"
 
@@ -17,7 +21,9 @@ static int failures = 0;
     }                                                                          \
   } while (0)
 
+// ============================================================================
 // Helpers
+// ============================================================================
 
 template <class F>
 bool throws(F&& f)
@@ -58,7 +64,9 @@ Eigen::Matrix<T, 1, Eigen::Dynamic> hrow(const Arow& a, const T& b)
   return r;
 }
 
-// homogenize / dehomogenize
+// ============================================================================
+// normalize.hpp: homogenize / dehomogenize
+// ============================================================================
 
 template <class T>
 void test_normalize()
@@ -66,7 +74,7 @@ void test_normalize()
   using C = cone_number_t<T>;
   using Row = Eigen::Matrix<C, 1, Eigen::Dynamic>;
 
-  // Ziegler p. 33
+  // --- H: lifting and round trip (Ziegler p. 33) ---------------------------
   RowMat<T> A(7, 2);
   A << -1, -4, -2, -1, 1, -2, 1, 0, 2, 1, -2, 6, -6, -1;
   Vec<T> z(7);
@@ -90,7 +98,7 @@ void test_normalize()
   for (Eigen::Index i = 0; i < 7; ++i)
     CHECK(same_direction(hrow<T>(A.row(i), z(i)), hrow<T>(P.h->A.row(i), P.h->z(i))));
 
-  // trivial and infeasible inequalities 
+  // --- H: trivial and infeasible inequalities ------------------------------
   {
     RowMat<T> A2(2, 2);
     A2 << 0, 0, 0, 0;
@@ -103,7 +111,7 @@ void test_normalize()
     CHECK(P2.h->A.rows() == 1 && sign(P2.h->z(0) + T(1)) == 0);
   }
 
-  // equalities 
+  // --- H: equalities --------------------------------------------------------
   {
     RowMat<T> A3(1, 2), Aeq(4, 2);
     A3 << 1, 1;
@@ -130,7 +138,7 @@ void test_normalize()
     CHECK(internal::is_zero(P3.h->A_eq.row(2)) && sign(P3.h->z_eq(2) - T(1)) == 0);
   }
 
-  // points, rays, lines round trip 
+  // --- V: points, rays, lines round trip ------------------------------------
   {
     RowMat<T> V(3, 2), Y(1, 2), L(1, 2);
     V << 0, 0, T(1) / T(2), T(3) / T(2), 1, 2;
@@ -152,7 +160,7 @@ void test_normalize()
     CHECK(same_direction(Q.v->L.row(0), L.row(0), true));
   }
 
-  // no points means P is empty; rays and lines are dropped 
+  // --- V: no points means P is empty; rays and lines are dropped ------------
   {
     RowMat<T> Y(1, 2), L(1, 2);
     Y << 1, 0;
@@ -165,7 +173,7 @@ void test_normalize()
     CHECK(Q.v->V.rows() == 0 && Q.v->Y.rows() == 0 && Q.v->L.rows() == 0);
   }
 
-  // invalid input 
+  // --- invalid input --------------------------------------------------------
   {
     Polyhedron<T> bad;
     bad.d = 2;
@@ -191,7 +199,10 @@ void test_normalize()
   }
 }
 
-// eliminate_k, histories, chenikov, kohler, elliminate_columns
+// ============================================================================
+// eliminate.hpp: eliminate_k, histories, Chernikov, Kohler, eliminate_columns
+// ============================================================================
+
 // The Fourier-Motzkin system for V -> H of the hexagon (Ziegler p. 33):
 // columns [ y0 y1 y2 | lambda_1 .. lambda_6 ], 12 rows.
 template <class T>
@@ -214,12 +225,12 @@ RowMat<cone_number_t<T>> hexagon_fm_system()
   for (Eigen::Index j = 0; j < n; ++j) M(2 * D + j, D + j) = C(-1);
   return M;
 }
- 
+
 template <class T>
 void test_eliminate()
 {
   using C = cone_number_t<T>;
- 
+
   // --- One step, FM reading: project Ziegler's p. 33 polygon onto x1 -------
   // Homogenized columns are (x0, x1, x2). Rows 5, 6 have x2 > 0 (upper bounds),
   // rows 1, 2, 3, 7 have x2 < 0 (lower bounds), row 4 and x0 >= 0 have x2 = 0.
@@ -229,11 +240,11 @@ void test_eliminate()
   z << -9, -4, 0, 4, 11, 17, -6;
   auto P = Polyhedron<T>::from_H(A, z);
   homogenize(P);
- 
+
   const RowMat<C> K = eliminate_k(P.h_cone->A, 2);
   CHECK(K.rows() == 2 + 2 * 4);           // |Z| + |P||N|
   CHECK((K.col(2).array() == 0).all());   // column 2 eliminated
- 
+
   // Read each row (b0, c, 0) at x0 = 1 as  b0 + c x1 <= 0.
   T lo = T(-1000), hi = T(1000);
   int at_half = 0;
@@ -250,7 +261,7 @@ void test_eliminate()
   CHECK(sign(T(lo - T(1) / T(2))) == 0);  // proj_2(P) = [1/2, 4]
   CHECK(sign(T(hi - T(4))) == 0);
   CHECK(at_half == 2);  // from pairs (6,2) and (6,7): row 7 is redundant
- 
+
   // --- One step, DD reading: square conv{(+-1, +-1)} cut by x1 = 0 ---------
   // Eliminating column 1 gives the crossing points of all 2 x 2 pairs,
   // including the diagonals.
@@ -258,7 +269,7 @@ void test_eliminate()
   V << 1, 1, 1, -1, -1, 1, -1, -1;
   auto Q = Polyhedron<T>::from_V(V);
   homogenize(Q);
- 
+
   const RowMat<C> G = eliminate_k(Q.v_cone->R, 1);
   CHECK(G.rows() == 4);
   int top = 0, bottom = 0, center = 0;
@@ -273,8 +284,8 @@ void test_eliminate()
   // diagonals): correct but redundant, the price of pairing non-adjacent points.
   CHECK(top == 1 && bottom == 1 && center == 2);
   CHECK(throws([&] { eliminate_k(G, 3); }));
- 
-  // Histories: with no bound, the step is exactly the plain kernel 
+
+  // --- Histories: with no bound, the step is exactly the plain kernel ------
   {
     const RowMat<C> M0 = hexagon_fm_system<T>();
     RowMat<C> plain = M0, tracked = M0;
@@ -293,52 +304,99 @@ void test_eliminate()
     for (std::size_t r = 0; r < H.rows(); ++r) over += H.count(r) > 5;
     CHECK(over > 2000);
   }
- 
-  // Chernikov: the same 4 steps with bound t + 1 stay small 
+
+  // --- Chernikov: the same 4 steps with bound t + 1 stay small --------------
   {
     RowMat<C> M = hexagon_fm_system<T>();
     auto H = Histories::singletons(static_cast<std::size_t>(M.rows()));
     for (Eigen::Index k = 3; k < 7; ++k) {
       const auto t = static_cast<std::size_t>(k - 3 + 1);
-      M = eliminate_k(M, k, &H, t + 1);
+      M = eliminate_k(M, k, &H, Pruning{t + 1});
       for (std::size_t r = 0; r < H.rows(); ++r) CHECK(H.count(r) <= t + 1);
     }
     CHECK(M.rows() < 20);
   }
- 
-  // Kohler: a combination whose history contains a Z row's is dropped 
+
+  // --- Kohler and Adjacency on a hand-built case -----------------------------
   {
     // Rows (1,1), (-1,1), (0,1); eliminating column 0 gives the Z row (0,1)
     // and the combination of rows 0 and 1. With (artificial) histories
-    // {0}, {1}, {0}, the combination has history {0,1}, which strictly
-    // contains the Z row's history {0}.
+    // {0}, {1}, {0}, the combination has history {0,1}, which contains the
+    // Z row's history {0}: Kohler drops it as a candidate, Adjacency because
+    // the current row 2 lies inside the pair's union.
     RowMat<C> M(3, 2);
     M << 1, 1, -1, 1, 0, 1;
     Histories H0(3, 3);
     H0.set(0, 0);
     H0.set(1, 1);
     H0.set(2, 0);
-    Histories H1 = H0;
-    CHECK(eliminate_k(M, 0, &H0).rows() == 2);                       // rule off
-    const RowMat<C> K2 = eliminate_k(M, 0, &H1, 3, true);             // rule on
-    CHECK(K2.rows() == 1 && H1.rows() == 1);
-    CHECK(K2.row(0) == M.row(2));
+    Histories Hn = H0, Hk = H0, Ha = H0;
+    CHECK(eliminate_k(M, 0, &Hn).rows() == 2);  // no rule
+    const RowMat<C> Kk = eliminate_k(M, 0, &Hk, Pruning{3, Pruning::Minimality::kohler});
+    const RowMat<C> Ka = eliminate_k(M, 0, &Ha, Pruning{3, Pruning::Minimality::adjacency});
+    CHECK(Kk.rows() == 1 && Kk.row(0) == M.row(2));
+    CHECK(Ka.rows() == 1 && Ka.row(0) == M.row(2));
   }
- 
-  // eliminate_columns: the whole V -> H elimination of the hexagon 
+
+  // --- Kohler and Adjacency agree step by step on minimal input --------------
+  {
+    auto run = [](RowMat<C> M, Eigen::Index first, Eigen::Index last, Pruning::Minimality mode) {
+      std::vector<RowMat<C>> steps;
+      auto H = Histories::singletons(static_cast<std::size_t>(M.rows()));
+      for (Eigen::Index k = first; k < last; ++k) {
+        M = eliminate_k(M, k, &H, Pruning{static_cast<std::size_t>(k - first + 2), mode});
+        steps.push_back(M);
+      }
+      return steps;
+    };
+    // The hexagon's V -> H system, and a random 3-D V -> H system.
+    std::vector<RowMat<C>> systems{hexagon_fm_system<T>()};
+    {
+      std::mt19937 gen(7);
+      std::uniform_int_distribution<int> coord(-9, 9);
+      RowMat<T> V(14, 3);
+      for (Eigen::Index i = 0; i < V.rows(); ++i)
+        for (Eigen::Index j = 0; j < 3; ++j) V(i, j) = T(coord(gen));
+      auto Q = Polyhedron<T>::from_V(V);
+      homogenize(Q);
+      const auto& R = Q.v_cone->R;
+      const Eigen::Index D = 4, n = R.rows();
+      RowMat<C> M = RowMat<C>::Zero(2 * D + n, D + n);
+      for (Eigen::Index c = 0; c < D; ++c) {
+        M(c, c) = C(1);
+        M.row(c).segment(D, n) = -R.col(c).transpose();
+        M.row(D + c) = -M.row(c);
+      }
+      for (Eigen::Index j = 0; j < n; ++j) M(2 * D + j, D + j) = C(-1);
+      systems.push_back(M);
+    }
+    for (const auto& M : systems) {
+      // rows = 2D + n and cols = D + n, so D = rows - cols; lambdas follow.
+      const Eigen::Index D = M.rows() - M.cols();
+      const auto a = run(M, D, M.cols(), Pruning::Minimality::kohler);
+      const auto b = run(M, D, M.cols(), Pruning::Minimality::adjacency);
+      CHECK(a.size() == b.size());
+      for (std::size_t s = 0; s < a.size() && s < b.size(); ++s) CHECK(a[s] == b[s]);
+    }
+  }
+
+  // --- eliminate_columns: the whole V -> H elimination of the hexagon -------
   {
     std::vector<Eigen::Index> trace;
     const RowMat<C> M = eliminate_columns(hexagon_fm_system<T>(), 3, 9, &trace);
     CHECK(trace.size() == 6);
     CHECK(*std::max_element(trace.begin(), trace.end()) < 20);
     CHECK((M.rightCols(6).array() == 0).all());  // all lambdas eliminated
- 
+
     // Ziegler's projection onto x1, done with eliminate_columns instead.
     const RowMat<C> K3 = eliminate_columns(RowMat<C>(P.h_cone->A), 2, 3, nullptr);
     CHECK((K3.col(2).array() == 0).all());
   }
 }
- 
+
+// ============================================================================
+// conversion.hpp: fourier_motzkin / double_description
+// ============================================================================
 
 // x satisfies A x <= z and A_eq x = z_eq.
 template <class T, class X>
@@ -350,7 +408,7 @@ bool satisfies(const typename Polyhedron<T>::HRep& H, const X& x)
     if (sign(T(H.A_eq.row(i).dot(x) - H.z_eq(i))) != 0) return false;
   return true;
 }
- 
+
 // Some row of M equals x (entrywise, up to tolerance).
 template <class T, class X>
 bool has_row(const RowMat<T>& M, const X& x)
@@ -362,7 +420,7 @@ bool has_row(const RowMat<T>& M, const X& x)
   }
   return false;
 }
- 
+
 // Some row of M points in the direction of x (up to positive scaling).
 template <class T, class X>
 bool has_direction(const RowMat<T>& M, const X& x)
@@ -371,7 +429,7 @@ bool has_direction(const RowMat<T>& M, const X& x)
     if (same_direction(M.row(i), x)) return true;
   return false;
 }
- 
+
 template <class T>
 void test_conversion()
 {
@@ -383,7 +441,7 @@ void test_conversion()
     return r;
   };
   const T half = T(1) / T(2);
- 
+
   // Ziegler p. 33: seven inequalities (row 7 redundant), six vertices.
   RowMat<T> A(7, 2);
   A << -1, -4, -2, -1, 1, -2, 1, 0, 2, 1, -2, 6, -6, -1;
@@ -391,16 +449,16 @@ void test_conversion()
   z << -9, -4, 0, 4, 11, 17, -6;
   RowMat<T> hexagon(6, 2);
   hexagon << 1, 2, 3, 3 * half, half, 3, 4, 2, 4, 3, 7 * half, 4;
- 
-  // H -> V: exactly the six vertices, no rays 
+
+  // --- H -> V: exactly the six vertices, no rays -----------------------------
   {
     auto P = Polyhedron<T>::from_H(A, z);
     compute_v_representation(P);
     CHECK(P.v->V.rows() == 6 && P.v->Y.rows() == 0);
     for (Eigen::Index i = 0; i < 6; ++i) CHECK(has_row(P.v->V, hexagon.row(i)));
   }
- 
-  // V -> H: valid inequalities, including facets 1..6 
+
+  // --- V -> H: valid inequalities, including facets 1..6 --------------------
   {
     auto P = Polyhedron<T>::from_V(hexagon);
     compute_h_representation(P);
@@ -409,15 +467,15 @@ void test_conversion()
     RowMat<T> Az(H.A.rows(), 3);
     Az << H.A, H.z;
     for (Eigen::Index i = 0; i < 6; ++i) CHECK(has_direction(Az, hrow<T>(A.row(i), z(i))));
- 
+
     // Round trip V -> H -> V: redundant inequalities do not create extra points.
     auto Q = Polyhedron<T>::from_H(H.A, H.z);
     compute_v_representation(Q);
     CHECK(Q.v->V.rows() == 6);
     for (Eigen::Index i = 0; i < 6; ++i) CHECK(has_row(Q.v->V, hexagon.row(i)));
   }
- 
-  // H -> V, non-pointed: the half-plane x2 >= 0 
+
+  // --- H -> V, non-pointed: the half-plane x2 >= 0 ---------------------------
   // Its line (the x1-axis) comes out as a pair of opposite rays.
   {
     RowMat<T> A1(1, 2);
@@ -434,8 +492,8 @@ void test_conversion()
     CHECK(has_direction(V.Y, row({-1, 0})));
     CHECK(has_direction(V.Y, row({0, 1})));
   }
- 
-  // V -> H, non-pointed: point (0,0), ray (0,1), line (1,0) 
+
+  // --- V -> H, non-pointed: point (0,0), ray (0,1), line (1,0) --------------
   {
     RowMat<T> V(1, 2), Y(1, 2), L(1, 2);
     V << 0, 0;
@@ -453,8 +511,8 @@ void test_conversion()
     Az << H.A, H.z;
     CHECK(has_direction(Az, row({0, -1, 0})));  // -x2 <= 0
   }
- 
-  // H -> V with an equality: the segment x1 + x2 = 1, x >= 0 
+
+  // --- H -> V with an equality: the segment x1 + x2 = 1, x >= 0 -------------
   {
     RowMat<T> A1(2, 2), Aeq(1, 2);
     A1 << -1, 0, 0, -1;
@@ -470,8 +528,8 @@ void test_conversion()
     for (Eigen::Index i = 0; i < P.v->V.rows(); ++i)
       CHECK(satisfies<T>(H, P.v->V.row(i).transpose()));
   }
- 
-  // H -> V, infeasible: x1 <= -1 and x1 >= 0 
+
+  // --- H -> V, infeasible: x1 <= -1 and x1 >= 0 ------------------------------
   {
     RowMat<T> A1(2, 1);
     A1 << 1, -1;
@@ -481,8 +539,8 @@ void test_conversion()
     compute_v_representation(P);
     CHECK(P.v->V.rows() == 0);
   }
- 
-  // The trace shows Chernikov's rule at work 
+
+  // --- The trace shows Chernikov's rule at work ------------------------------
   {
     auto P = Polyhedron<T>::from_V(hexagon);
     homogenize(P);
@@ -493,16 +551,16 @@ void test_conversion()
   }
 }
 
+// ============================================================================
 
 template <class T>
 void run_all()
 {
   test_normalize<T>();
   test_eliminate<T>();
+  test_conversion<T>();
 }
 
-
-// main
 int main()
 {
   run_all<double>();
